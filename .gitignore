@@ -1,0 +1,23 @@
+# Rust / Cargo
+/target/
+*.rs.bk
+*.pdb
+/xicontrol
+
+# Kernel module build artifacts
+/kmod/*.o
+/kmod/*.ko
+/kmod/*.mod
+/kmod/*.mod.c
+/kmod/*.mod.o
+/kmod/.*.cmd
+/kmod/modules.order
+/kmod/Module.symvers
+/kmod/.tmp_versions/
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/

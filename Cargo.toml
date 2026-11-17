@@ -1,0 +1,13 @@
+[package]
+name = "xicontrol"
+version = "1.0.0"
+edition = "2024"
+description = "Native Linux XiControl GUI & CLI for Xiaomi Book Pro 14 (TM2424)"
+license = "GPL-3.0"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+ksni = { version = "0.3.7", default-features = false, features = ["blocking", "async-io"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
