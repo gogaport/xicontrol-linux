@@ -208,7 +208,21 @@ impl TelemetrySampler {
 }
 
 pub fn read_ac_online() -> bool {
-    read_u32("/sys/class/power_supply/ADP1/online").unwrap_or(0) == 1
+    if let Some(v) = read_u32("/sys/class/power_supply/ADP1/online") {
+        return v == 1;
+    }
+    if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let kind = fs::read_to_string(p.join("type")).unwrap_or_default();
+            if kind.trim().eq_ignore_ascii_case("Mains")
+                && read_u32(p.join("online").to_str().unwrap_or("")).unwrap_or(0) == 1
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn read_u32(path: &str) -> Option<u32> {

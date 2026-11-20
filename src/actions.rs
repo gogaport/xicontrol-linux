@@ -285,34 +285,46 @@ pub fn set_perf_mode_checked(shared: &SharedHandle, mode: PerfMode) -> Result<()
         return Err(msg);
     }
 
-    let res = mifs::set_perf_mode(mode);
-    let osd_enabled = {
+    let res = mifs::set_perf_mode_detailed(mode);
+    let ac_still_online = ac_online && sys::read_ac_online();
+    let (osd_enabled, msg_res, config_changed) = {
         let mut s = shared.lock().unwrap();
         let name = mode.api_name().to_string();
-        match &res {
+        let mut changed = false;
+        let out = match res {
             Ok(()) => {
                 config::remove_perf_mode(&mut s.config.unavailable_modes, mode);
                 s.config.last_mode = name;
                 s.perf_mode = Some(mode);
                 s.last_error = None;
                 let _ = s.config.save();
+                changed = true;
+                Ok(())
             }
             Err(e) => {
-                if ac_online && !config::contains_perf_mode(&s.config.unavailable_modes, mode) {
+                let mark_unavail = e.is_firmware_rejection()
+                    && ac_still_online
+                    && !mode.is_battery_capable();
+                let msg = e.into_message();
+                if mark_unavail && !config::contains_perf_mode(&s.config.unavailable_modes, mode) {
                     s.config.unavailable_modes.push(name);
                     let _ = s.config.save();
+                    changed = true;
                 }
-                s.last_error = Some(e.clone());
+                s.last_error = Some(msg.clone());
+                Err(msg)
             }
-        }
-        s.config.osd_enabled
+        };
+        (s.config.osd_enabled, out, changed)
     };
-    if res.is_ok() {
+    if msg_res.is_ok() {
         let prefix = if en { "Power" } else { "Режим" };
         sys::show_osd(osd_enabled, "battery-profile-performance-symbolic", &format!("{prefix}: {}", mode.label(en)));
+    }
+    if config_changed {
         daemon::notify_daemon_reload();
     }
-    res
+    msg_res
 }
 
 pub fn cycle_perf_mode(shared: &SharedHandle) -> Result<PerfMode, String> {

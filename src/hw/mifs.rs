@@ -133,13 +133,33 @@ pub fn charge_percent_for_code(code: u8) -> Option<u8> {
     }
 }
 
-fn mifs_call(op: u8, cmd: u8, arg: u8, val: u8) -> Result<[u8; 32], String> {
+#[derive(Debug, Clone)]
+pub enum PerfModeSetError {
+    /// Device open/read/write error (e.g. driver unloaded, permission denied, transient I/O).
+    Io(String),
+    /// EC firmware explicitly rejected or did not retain the requested mode.
+    FirmwareRejected(String),
+}
+
+impl PerfModeSetError {
+    pub fn is_firmware_rejection(&self) -> bool {
+        matches!(self, PerfModeSetError::FirmwareRejected(_))
+    }
+
+    pub fn into_message(self) -> String {
+        match self {
+            PerfModeSetError::Io(s) | PerfModeSetError::FirmwareRejected(s) => s,
+        }
+    }
+}
+
+fn mifs_call(op: u8, cmd: u8, arg: u8, val: u8) -> Result<[u8; 32], PerfModeSetError> {
     let _guard = MIFS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut file = OpenOptions::new()
         .read(true)
         .write(true)
         .open(MIFS_DEV)
-        .map_err(|e| format!("Нет доступа к {MIFS_DEV}: {e}"))?;
+        .map_err(|e| PerfModeSetError::Io(format!("Нет доступа к {MIFS_DEV}: {e}")))?;
 
     let mut pkt = [0u8; 32];
     pkt[1] = op;
@@ -147,44 +167,64 @@ fn mifs_call(op: u8, cmd: u8, arg: u8, val: u8) -> Result<[u8; 32], String> {
     pkt[4] = arg;
     pkt[6] = val;
 
-    file.write_all(&pkt).map_err(|e| format!("Ошибка записи MIFS: {e}"))?;
+    file.write_all(&pkt)
+        .map_err(|e| PerfModeSetError::Io(format!("Ошибка записи MIFS: {e}")))?;
     let mut out = [0u8; 32];
-    file.read_exact(&mut out).map_err(|e| format!("Ошибка чтения MIFS: {e}"))?;
+    file.read_exact(&mut out)
+        .map_err(|e| PerfModeSetError::Io(format!("Ошибка чтения MIFS: {e}")))?;
 
     if out[1] == MIFS_STATUS_UNSUPPORTED {
-        return Err(format!("Команда 0x{cmd:02X} не поддерживается прошивкой (0xE0)"));
+        return Err(PerfModeSetError::FirmwareRejected(format!(
+            "Команда 0x{cmd:02X} не поддерживается прошивкой (0xE0)"
+        )));
     }
     if out[1] != MIFS_STATUS_OK && out[1] != op {
-        return Err(format!("Прошивка отклонила команду 0x{cmd:02X} (статус 0x{:02X})", out[1]));
+        return Err(PerfModeSetError::FirmwareRejected(format!(
+            "Прошивка отклонила команду 0x{cmd:02X} (статус 0x{:02X})",
+            out[1]
+        )));
     }
     Ok(out)
 }
 
 pub fn get_perf_mode() -> Result<PerfMode, String> {
-    let out = mifs_call(MIFS_OP_GET, CMD_PERF, 0, 0)?;
+    let out = mifs_call(MIFS_OP_GET, CMD_PERF, 0, 0).map_err(PerfModeSetError::into_message)?;
     PerfMode::from_byte(out[4]).ok_or_else(|| format!("Неизвестный код режима: 0x{:02X}", out[4]))
 }
 
-pub fn set_perf_mode(mode: PerfMode) -> Result<(), String> {
+pub fn set_perf_mode_detailed(mode: PerfMode) -> Result<(), PerfModeSetError> {
+    let prev = get_perf_mode().ok();
     mifs_call(MIFS_OP_SET, CMD_PERF, mode as u8, 0)?;
-    let mut actual = get_perf_mode()?;
+    let mut actual = get_perf_mode().map_err(PerfModeSetError::Io)?;
+    // On TM2424, switching directly out of Eco can first land in Auto; retry once.
+    if actual != mode && prev == Some(PerfMode::Eco) && actual == PerfMode::Auto {
+        thread::sleep(Duration::from_millis(120));
+        mifs_call(MIFS_OP_SET, CMD_PERF, mode as u8, 0)?;
+        actual = get_perf_mode().map_err(PerfModeSetError::Io)?;
+    }
     // On TM2424 battery power, EC echoes Quiet/Turbo/FullSpeed at t=0 and reverts ~150ms later.
     if actual == mode && !mode.is_battery_capable() {
         thread::sleep(Duration::from_millis(220));
-        actual = get_perf_mode()?;
+        actual = get_perf_mode().map_err(PerfModeSetError::Io)?;
     }
     if actual != mode {
-        return Err(format!(
+        return Err(PerfModeSetError::FirmwareRejected(format!(
             "Прошивка EC не удержала режим {} (активен {})",
             mode.label(false),
             actual.label(false)
-        ));
+        )));
     }
     Ok(())
 }
 
+#[allow(dead_code)]
+pub fn set_perf_mode(mode: PerfMode) -> Result<(), String> {
+    set_perf_mode_detailed(mode).map_err(PerfModeSetError::into_message)
+}
+
 pub fn get_charge_limit() -> Result<u8, String> {
-    let out = mifs_call(MIFS_OP_GET, CMD_CHARGE, SUB_CHARGE_LIMIT, 0)?;
+    let out = mifs_call(MIFS_OP_GET, CMD_CHARGE, SUB_CHARGE_LIMIT, 0)
+        .map_err(PerfModeSetError::into_message)?;
     charge_percent_for_code(out[6]).ok_or_else(|| format!("Неизвестный код лимита заряда: {}", out[6]))
 }
 
@@ -196,7 +236,8 @@ pub fn set_charge_limit(percent: u8) -> Result<(), String> {
         let _ = mifs_call(MIFS_OP_SET, CMD_CHARGE, SUB_CHARGE_LIMIT, 0);
         thread::sleep(Duration::from_millis(80));
     }
-    mifs_call(MIFS_OP_SET, CMD_CHARGE, SUB_CHARGE_LIMIT, code)?;
+    mifs_call(MIFS_OP_SET, CMD_CHARGE, SUB_CHARGE_LIMIT, code)
+        .map_err(PerfModeSetError::into_message)?;
     Ok(())
 }
 

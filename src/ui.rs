@@ -462,18 +462,18 @@ fn render_perf_mode_tiles(
         for m in PerfMode::ALL {
             let is_unavail = config::contains_perf_mode(unavail, m);
             let ac_only = !ac_online && !m.is_battery_capable();
-            let enabled = !is_unavail && !ac_only;
-            let badge = if is_unavail {
-                Some("N/A")
-            } else if ac_only {
+            let enabled = !ac_only;
+            let badge = if ac_only {
                 Some("AC")
+            } else if is_unavail {
+                Some("N/A")
             } else {
                 None
             };
-            let tip = if is_unavail {
-                Some(if en { "Not supported by this laptop's EC firmware" } else { "Не поддерживается прошивкой EC этой модели" })
-            } else if ac_only {
+            let tip = if ac_only {
                 Some(if en { "Requires AC power (on battery EC allows Eco and Auto only)" } else { "Доступно только от сети (от батареи EC разрешает только Eco и Авто)" })
+            } else if is_unavail {
+                Some(if en { "Previously rejected by EC firmware — click to retry" } else { "Ранее отклонён прошивкой EC — нажмите, чтобы попробовать снова" })
             } else {
                 None
             };
@@ -897,7 +897,9 @@ impl eframe::App for XiGuiApp {
                             self.daemon_online = daemon::send_ipc_command("PING").is_ok();
                             self.poll_diag();
                             {
-                                let s = self.shared.lock().unwrap();
+                                let fresh_cfg = config::AppConfig::load();
+                                let mut s = self.shared.lock().unwrap();
+                                s.config = fresh_cfg;
                                 if let Some(tp) = &s.touchpad_state {
                                     if let Some(sl) = tp.slide_strength {
                                         self.slide_draft = sl;
@@ -1132,11 +1134,27 @@ impl XiGuiApp {
                 self.set_status(r, ok_msg);
             }
             ui.add_space(8.0);
-            let mut restore = cfg.restore_mode_on_boot;
-            if toggle_switch(ui, &mut restore, if en { "Restore last mode on daemon start" } else { "Восстанавливать режим при запуске демона" }) {
-                self.shared.lock().unwrap().config.restore_mode_on_boot = restore;
-                self.save_and_notify();
-            }
+            ui.horizontal_wrapped(|ui| {
+                let mut restore = cfg.restore_mode_on_boot;
+                if toggle_switch(ui, &mut restore, if en { "Restore last mode on daemon start" } else { "Восстанавливать режим при запуске демона" }) {
+                    self.shared.lock().unwrap().config.restore_mode_on_boot = restore;
+                    self.save_and_notify();
+                }
+                if !cfg.unavailable_modes.is_empty() {
+                    ui.add_space(12.0);
+                    if ui
+                        .button(if en { "Reset N/A modes" } else { "Сбросить пометки N/A" })
+                        .clicked()
+                    {
+                        self.shared.lock().unwrap().config.unavailable_modes.clear();
+                        self.save_and_notify();
+                        self.set_status(
+                            Ok(()),
+                            if en { "N/A mode marks cleared" } else { "Пометки N/A сброшены" }.into(),
+                        );
+                    }
+                }
+            });
         });
         ui.add_space(10.0);
 

@@ -115,9 +115,11 @@ impl Tray for MainTray {
             .copied()
             .map(|m| {
                 let is_unavail = contains_perf_mode(&snap.unavail, m);
-                let allowed = !is_unavail && (snap.ac_online || m.is_battery_capable());
+                let allowed = snap.ac_online || m.is_battery_capable();
                 let lbl = if !snap.ac_online && !m.is_battery_capable() {
                     if en { format!("{} (AC only)", m.label(en)) } else { format!("{} (от сети)", m.label(en)) }
+                } else if is_unavail {
+                    format!("{} (N/A)", m.label(en))
                 } else {
                     m.label(en).into()
                 };
