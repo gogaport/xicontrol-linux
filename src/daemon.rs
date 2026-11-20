@@ -12,13 +12,40 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static DZ_ENABLED: AtomicBool = AtomicBool::new(false);
 static DZ_MM: AtomicU8 = AtomicU8::new(12);
 static DAEMON_STOP: AtomicBool = AtomicBool::new(false);
 static IS_DAEMON: AtomicBool = AtomicBool::new(false);
+static LAST_PERF_SET_MS: AtomicU64 = AtomicU64::new(0);
+
+const WMI_PERF_SUPPRESS_MS: u64 = 1500;
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn mark_perf_mode_changing_local() {
+    LAST_PERF_SET_MS.store(unix_now_ms(), Ordering::SeqCst);
+}
+
+/// Suppresses EC-emitted KEY_PERFORMANCE (701) echo events while software is changing the mode.
+pub fn mark_perf_mode_changing() {
+    mark_perf_mode_changing_local();
+    if !is_daemon_process() {
+        let _ = send_ipc_command("SUPPRESS_WMI_PERF");
+    }
+}
+
+fn is_wmi_perf_suppressed() -> bool {
+    let last = LAST_PERF_SET_MS.load(Ordering::SeqCst);
+    last > 0 && unix_now_ms().saturating_sub(last) < WMI_PERF_SUPPRESS_MS
+}
 
 pub fn is_daemon_process() -> bool {
     IS_DAEMON.load(Ordering::Relaxed)
@@ -141,6 +168,10 @@ fn handle_ipc_line(shared: &SharedHandle, cmd: &str) -> String {
     if cmd == "RESET_TP_PEAK" {
         let mut s = shared.lock().unwrap();
         s.peak_tp_pressure = s.live_tp_pressure;
+        return "OK".into();
+    }
+    if cmd == "SUPPRESS_WMI_PERF" {
+        mark_perf_mode_changing_local();
         return "OK".into();
     }
     if let Some(hz_str) = cmd.strip_prefix("EXPECTED_HZ ") {
@@ -376,6 +407,12 @@ fn start_wmi_hotkey_thread(shared: SharedHandle) {
                     _ => None,
                 };
                 if let Some(slot_name) = slot {
+                    if slot_name == "wmi_perf" {
+                        if is_wmi_perf_suppressed() {
+                            continue;
+                        }
+                        mark_perf_mode_changing_local();
+                    }
                     let sh = shared.clone();
                     std::thread::spawn(move || {
                         let _ = actions::trigger_slot(&sh, slot_name);

@@ -285,7 +285,9 @@ pub fn set_perf_mode_checked(shared: &SharedHandle, mode: PerfMode) -> Result<()
         return Err(msg);
     }
 
+    daemon::mark_perf_mode_changing();
     let res = mifs::set_perf_mode_detailed(mode);
+    daemon::mark_perf_mode_changing();
     let ac_still_online = ac_online && sys::read_ac_online();
     let (osd_enabled, msg_res, config_changed) = {
         let mut s = shared.lock().unwrap();
